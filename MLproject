@@ -31,7 +31,6 @@ adapters: {'Cases': 'disease_cases',
            'week': 'week',
            'ID_year': 'year',
            'ID_spat': 'location',
-           'mean_temperature': 'temperature',
            }
 
 
