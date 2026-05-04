@@ -33,6 +33,8 @@ adapters: {'Cases': 'disease_cases',
            'ID_spat': 'location',
            }
 
+docker_env:
+  image: ghcr.io/dhis2-chap/chapkit-r-tidyverse:latest
 
 entry_points:
   train:
