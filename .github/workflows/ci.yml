@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  docker-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: xgboost-for-malawi:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Start container
+        run: docker run -d --name chapkit-ci -p 8000:8000 xgboost-for-malawi:ci
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Install deps
+        run: uv sync --all-groups
+      - name: Run chapkit test against container
+        run: uv run chapkit test --url http://localhost:8000 --timeout 300 --verbose
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs chapkit-ci
+      - name: Stop container
+        if: always()
+        run: docker rm -f chapkit-ci

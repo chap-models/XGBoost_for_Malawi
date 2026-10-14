@@ -1,0 +1,237 @@
+# XGBoost_for_Malawi — chapkit service
+
+A general XGBoost model fitted individually for each region..
+
+This project is now a [**chapkit**](https://github.com/dhis2-chap/chapkit) service — a small FastAPI app that wraps your existing train/predict scripts and exposes them to the [chap-core](https://github.com/dhis2-chap/chap-core) orchestrator as a standard HTTP service.
+
+[`chapkit mlproject migrate`](https://dhis2-chap.github.io/chapkit/guides/mlproject-migrate/) generated the wrapper; your scripts are untouched. The original `MLproject` and anything chapkit regenerated (README, pyproject, etc.) are preserved under `_old/`.
+
+## TL;DR
+
+| Do this | You get |
+| --- | --- |
+| [`make test`](#smoke-test-with-chapkit-test) | One-shot smoke test against the built Docker image (build + start container + run chapkit test + tear down) |
+| [`make docker-build && make docker-run`](#run-it-in-docker) | Image built on [`chapkit-r`](https://github.com/dhis2-chap/chapkit-images), published on host `:9090` (container `:8000`) |
+| [`/docs`](http://127.0.0.1:9090/docs) | Live OpenAPI UI for the service |
+
+This is an R model — Docker is the supported path because `main.py` spawns R scripts that need R + `renv.lock` packages installed. The Docker image ships both; your host probably doesn't.
+
+`make help` in the repo root lists every target.
+
+## Run it locally
+!!! warning "R model — prefer Docker"
+    `main.py` invokes your `train.R` / `predict.R` scripts via `subprocess`, so the host needs R plus every package in `renv.lock` restored. Unless you actively develop R on this machine, **use [Docker](#run-it-in-docker) instead** — the base image has R and the packages pre-installed.
+
+If you *do* have R set up locally (with `Rscript` on `$PATH` and `renv.lock` already restored into a project-local library):
+
+```bash
+uv sync                # installs chapkit + Python deps into .venv
+uv run python main.py   # serves on http://127.0.0.1:9090 — calls into your R scripts
+```
+
+Poke at [http://127.0.0.1:9090/docs](http://127.0.0.1:9090/docs) for the OpenAPI UI, or `/health` for a heartbeat.
+
+## Run it in Docker
+
+```bash
+docker build --build-arg GIT_REVISION=$(git rev-parse HEAD) -t xgboost-for-malawi .
+docker run --rm -p 9090:8000 xgboost-for-malawi
+```
+
+`GIT_REVISION` is optional: it bakes the commit into the image so `GET /api/v1/info`
+reports it as `git_revision` (`make docker-build` and `compose.yml` pass it for you).
+
+The image runs as an unprivileged `chapkit` user, and `compose.yml` additionally
+mounts the root filesystem read-only with `/work/data` (SQLite database) and `/tmp`
+(ML workspaces, tmpfs) as the only writable paths. Model code that writes elsewhere
+(a cache directory next to the scripts, for example) needs a volume for that path in
+`compose.yml`, or `read_only: true` removed. The renv library is
+restored at build time into `/opt/renv/cache` and the project library, both readable
+by that user, and renv's sandbox is disabled so nothing is written at startup.
+The image builds on [`ghcr.io/dhis2-chap/chapkit-r:latest`](https://github.com/dhis2-chap/chapkit-images), one of the pre-baked [chapkit base images](https://github.com/dhis2-chap/chapkit-images) with Python/R and the common ML stack ready to go.
+
+## Smoke-test with `chapkit test`
+
+[`chapkit test`](https://dhis2-chap.github.io/chapkit/guides/testing-ml-services/) is the first thing to run after migrating. It POSTs a synthetic config, generates synthetic [panel data](https://dhis2-chap.github.io/chapkit/guides/testing-ml-services/#generated-data-structure), drives a full train → predict cycle, and reports back. A clean run means your MLproject translated cleanly and your scripts read the config shape they expected.
+### The fastest path
+
+```bash
+make test
+```
+
+Builds the Docker image, starts the container on host port 9090, runs `chapkit test --url http://localhost:9090`, then tears the container down. No second terminal needed.
+
+Going through Docker (rather than `--start-service`) means the smoke test exercises the same image you'll ship — the build picks up `Dockerfile` changes, baked-in R packages, and so on — and works uniformly for Python and R models.
+
+### Two-terminal flow (more control)
+
+```bash
+# terminal 1:
+make docker-run    # or `make run` for Python, if R + renv aren't your problem here
+
+# terminal 2 (from the same project dir):
+make test-remote   # uv run chapkit test --url http://localhost:9090
+```
+
+Use this when you want to poke at the live service (http://127.0.0.1:9090/docs) between test runs, or tail the server logs while the test drives it.
+
+### What a clean run looks like
+
+```
+==================================================
+TEST SUMMARY
+==================================================
+Service URL:           http://localhost:9090
+Elapsed time:          6.48s
+Configs created:       1
+Trainings completed:   1
+Trainings failed:      0
+Predictions completed: 1
+Predictions failed:    0
+
+Result: ALL TESTS PASSED
+```
+
+### Useful flags
+
+| Flag | Default | When to use |
+| --- | --- | --- |
+| `--start-service` | off | Spawns `python main.py` in the host's uv venv. Python models only; R models can't run that way (no R + renv on the host). `make test` builds + drives the Docker container instead, which works for both. |
+| `-c / --configs N` | `1` | Stress-test multiple config variations |
+| `-t / --trainings N` | `1` | Train multiple times per config |
+| `-p / --predictions N` | `1` | Predict multiple times per trained model |
+| `--rows N` | `250` | Size of training panel (locations × periods); bump for long-context models |
+| `--predict-rows N` | `150` | Size of historic+future frames; bump if you see "X must have same columns as X in fit" |
+| `--period-type weekly` | `monthly` | Emit `YYYY-Wxx` periods instead of `YYYY-mm` |
+| `--geo-type point` | `polygon` | Point geometries in the generated `geo.json` |
+| `--save-data` | off | Dumps the generated CSVs/JSON to `target/` so you can inspect what the scripts saw |
+| `-v / --verbose` | off | Per-step output |
+| `--debug` | off | Full tracebacks on errors |
+
+Full reference: [Testing ML Services guide](https://dhis2-chap.github.io/chapkit/guides/testing-ml-services/).
+
+### When it fails
+
+The test reports `N FAILURE(S)` in the summary, and the real error is in the **server logs** (terminal 1, or `docker logs <container>` if running in Docker). Look for log lines with `train_script_failed` or `predict_script_failed` — the `stderr=...` field has the actual traceback from your script.
+
+Three common failure shapes and their fixes:
+
+| Symptom | What it means | Fix |
+| --- | --- | --- |
+| `KeyError: "['<col>'] not in index"` at train time | Your script hardcodes a column the synthetic data didn't include. | Add the column to `MLServiceInfo.required_covariates=[...]` in `main.py` (preferred: declare `required_covariates:` in the original MLproject and re-migrate). |
+| `KeyError: '<name>'` reading from `config.yml` | Your script reads a key the generated Config class doesn't define. | Add the typed field to the `XGBoostForMalawiConfig` class (preferred: declare it under `user_options:` in the original MLproject and re-migrate). |
+| `TypeError: <func>() got an unexpected keyword argument '<kw>'` | An unpinned dep resolved to a newer major version than your script was written against (e.g. pandas 2.1 removed `fillna(method=)`). | Pin the dep in `pyproject.toml` (e.g. `"pandas>=2.0,<2.1"`) and rebuild. |
+
+Full iteration checklist — including "re-run migrate vs. edit `main.py` directly", bumping `author_assessed_status`, and the rest of the post-migration workflow — lives in the [Migration Checklist](https://dhis2-chap.github.io/chapkit/guides/mlproject-migration-checklist/#after-migration).
+
+### Inspecting what the test generated
+
+Pass `--save-data` and the CSVs and JSON configs the harness sent are dumped under `target/`:
+
+```bash
+uv run chapkit test --url http://localhost:9090 --save-data
+ls target/
+#   config_*.json              the config(s) POSTed
+#   training_*.json / .csv     training panel data (time_period, location, disease_cases, ...)
+#   prediction_*_historic.*    historic frame for prediction
+#   prediction_*_future.*      future frame (disease_cases nulled)
+#   geo.json                   GeoJSON when requires_geo is set
+```
+
+Useful for reproducing a failure outside chapkit: feed the same CSVs into your script manually.
+
+## What's in the box
+
+- **`main.py`** — the generated chapkit service. Defines your [`XGBoostForMalawiConfig`](https://dhis2-chap.github.io/chapkit/guides/configuration-management/), wires a [`ShellModelRunner`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#shellmodelrunner) to your scripts, and hands everything to [`MLServiceBuilder`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#mlservicebuilder-recommended).
+- **`Dockerfile`**, **`compose.yml`**, **`pyproject.toml`**, **`README.md`**, **`.gitignore`**, **`.dockerignore`** — all generated, all yours to edit.
+- **Your train/predict scripts**, helpers, Python packages, lockfiles, `LICENSE`, and any arbitrary `*.yaml`/`*.json` config files your scripts read — **untouched**, at the project root.
+- **`_old/`** — safety net: original `MLproject`, pre-existing metadata files chapkit regenerated, example input/output, ad-hoc runners (`isolated_run.*`). Nothing here is loaded at runtime; browse freely, copy anything worth porting back.
+
+## Key concepts (all generated into `main.py`)
+
+### [`MLServiceInfo`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#mlserviceinfo-fields) — who you are
+
+The service's public identity and contract: `id`, `display_name`, `description`, [`model_metadata`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#modelmetadata-fields), [`period_type`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#mlserviceinfo-fields) (`monthly` / `weekly` / `any`), [`required_covariates`](#covariates). This is what chap-core reads via `/api/v1/info` when it decides whether to dispatch a dataset to your model.
+
+### [`ModelMetadata.author_assessed_status`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#modelmetadata-fields) — traffic-light maturity
+
+One of `green` / `yellow` / `orange` / `red` / `gray`. Self-assessed by you, the model author; visible to anyone browsing chap-core. Pick conservatively - chap-core surfaces this in the UI so deployers can make informed choices.
+
+| Status | Meaning |
+| --- | --- |
+| `green` | Validated and ready for production use |
+| `yellow` | Ready for more rigorous testing on diverse data |
+| `orange` | Shows promise on limited data, needs manual configuration and careful evaluation |
+| `red` | Highly experimental prototype, not validated, only for early experimentation |
+| `gray` | Not intended for use - deprecated or kept only for backwards compatibility |
+
+Migrate defaults to `yellow` when the MLproject doesn't set one — bump it up (or down) to match reality.
+
+### [`XGBoostForMalawiConfig`](https://dhis2-chap.github.io/chapkit/guides/configuration-management/) — your tunable knobs
+
+A [`BaseConfig`](https://dhis2-chap.github.io/chapkit/api-reference/#chapkit.config.schemas.BaseConfig) subclass with typed fields derived from your MLproject's `user_options`. Each POSTed config becomes a row in the service's DB and feeds into train/predict via `config.yml` (see [`config.yml` layout](#configyml-layout)).
+
+### [`ShellModelRunner`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#shellmodelrunner) — runs your scripts
+
+Wraps `train_command` / `predict_command`. For each train or predict job chapkit copies your project into a temp workspace, writes `data.csv` / `historic.csv` / `future.csv` / `config.yml` / `geo.json`, runs your script there, and captures the whole workspace as an [artifact](#artifacts).
+
+### [`ArtifactHierarchy`](https://dhis2-chap.github.io/chapkit/guides/artifact-storage/) — keeps your runs
+
+Every train and predict call produces an [artifact](https://dhis2-chap.github.io/chapkit/guides/artifact-storage/) (a zipped workspace with logs, the trained model, predictions, etc.). They're linked parent-child so you can trace a prediction back to the training run that produced it.
+
+## `config.yml` layout
+
+Your scripts receive a `config.yml` in the working directory on every train/predict call. The generated `main.py` picks `config_format="chap_core"` so the file matches [chap-core's `ModelConfiguration` shape](https://github.com/dhis2-chap/chap-core/blob/master/chap_core/database/model_templates_and_config_tables.py):
+
+```yaml
+prediction_periods: 3
+additional_continuous_covariates: [rainfall, mean_temperature]
+user_option_values:
+  n_lags: 3
+  precision: 0.01
+```
+
+- `prediction_periods` and `additional_continuous_covariates` are **reserved** — always at the top level.
+- Anything else you put on the Config class nests under `user_option_values`.
+
+That's the shape scripts ported from the `chap-models` ecosystem already expect — they read `config["user_option_values"]["<option>"]` (Python) or `config$user_option_values$<option>` (R) unchanged.
+
+**Prefer flat?** Switch `config_format="flat"` in `main.py` and keys land at the top level — good fit when you own the scripts and don't need chap-core compatibility. This is the default for [`chapkit init`](https://dhis2-chap.github.io/chapkit/guides/cli-scaffolding/) scaffolds.
+
+## Covariates
+
+Two fields, two different jobs:
+
+| Field | Lives on | When to use |
+| --- | --- | --- |
+| [`MLServiceInfo.required_covariates`](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#mlserviceinfo-fields) | The service | The model cannot function without these columns. chap-core refuses to dispatch if they're missing. Use when your scripts hardcode feature names. |
+| [`XGBoostForMalawiConfig.additional_continuous_covariates`](https://dhis2-chap.github.io/chapkit/guides/configuration-management/) | Per config | Extra climate covariates to lag as predictors. Set per-deployment via a POSTed config; the default in `main.py` is the fallback. |
+
+When in doubt, **prefer `required_covariates`** — it's the stricter contract and the one chap-core checks at dispatch time.
+
+## Artifacts
+
+Each train/predict call leaves a zipped workspace behind, browsable at [`/api/v1/artifacts`](http://127.0.0.1:9090/docs#/artifacts). Jobs are scheduled via [`/api/v1/jobs`](http://127.0.0.1:9090/docs#/jobs) so you can POST training and poll for completion. Full API reference: [`/docs`](http://127.0.0.1:9090/docs) once the service is running, or the [ML workflows guide](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/#api-reference).
+
+## Registering with chap-core
+
+The generated `main.py` calls `.with_registration()`, so when the service starts with `SERVICEKIT_ORCHESTRATOR_URL` set, it auto-registers with chap-core and sends keepalive pings. No env var → silently no-ops, so local `python main.py` just runs the service.
+
+```yaml
+# compose fragment
+services:
+  xgboost-for-malawi:
+    build: .
+    environment:
+      SERVICEKIT_ORCHESTRATOR_URL: http://chap:8000/v2/services/$$register
+      # SERVICEKIT_REGISTRATION_KEY: ${SERVICEKIT_REGISTRATION_KEY:-}   # optional shared secret
+    depends_on:
+      chap:
+        condition: service_healthy
+```
+
+## Links
+
+- **chapkit docs** → [user guides](https://dhis2-chap.github.io/chapkit/) · [ML workflows](https://dhis2-chap.github.io/chapkit/guides/ml-workflows/) · [configuration](https://dhis2-chap.github.io/chapkit/guides/configuration-management/) · [artifacts](https://dhis2-chap.github.io/chapkit/guides/artifact-storage/) · [testing](https://dhis2-chap.github.io/chapkit/guides/testing-ml-services/) · [API reference](https://dhis2-chap.github.io/chapkit/api-reference/)
+- **CLI** → [`chapkit mlproject migrate`](https://dhis2-chap.github.io/chapkit/guides/mlproject-migrate/) · [`chapkit mlproject run`](https://dhis2-chap.github.io/chapkit/guides/mlproject-runner/) · [`chapkit init`](https://dhis2-chap.github.io/chapkit/guides/cli-scaffolding/) · [`chapkit test`](https://dhis2-chap.github.io/chapkit/guides/testing-ml-services/)
+- **Ecosystem** → [chapkit on GitHub](https://github.com/dhis2-chap/chapkit) · [chap-core](https://github.com/dhis2-chap/chap-core) · [chapkit base images](https://github.com/dhis2-chap/chapkit-images) · [chap-models catalogue](https://github.com/chap-models)
