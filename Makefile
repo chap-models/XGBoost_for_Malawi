@@ -24,10 +24,16 @@ run:
 # Build + run the image, then drive `chapkit test` against the running container.
 # Required for R-based models (the host doesn't have R + the renv packages),
 # useful for Python ones too because it exercises the same image that ships
-# downstream. `chapkit test` polls /health internally, so no extra wait step.
+# downstream. `chapkit test` fails on its first request if the server is not
+# listening yet, so wait for /health before driving it.
 test: docker-build
 	@docker rm -f $(IMAGE)-test 2>/dev/null || true
 	docker run -d --name $(IMAGE)-test -p $(PORT):8000 $(PLATFORM_FLAG) $(IMAGE)
+	@for i in $$(seq 1 60); do \
+		curl -fsS http://localhost:$(PORT)/health >/dev/null 2>&1 && break; \
+		if [ $$i -eq 60 ]; then echo "service did not become healthy in time"; docker logs $(IMAGE)-test; docker rm -f $(IMAGE)-test >/dev/null; exit 1; fi; \
+		sleep 2; \
+	done
 	@uv run chapkit test --url http://localhost:$(PORT); status=$$?; \
 		docker stop $(IMAGE)-test >/dev/null; \
 		docker rm $(IMAGE)-test >/dev/null; \

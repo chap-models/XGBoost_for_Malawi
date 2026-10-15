@@ -25,6 +25,17 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Start container
         run: docker run -d --name chapkit-ci -p 8000:8000 xgboost-for-malawi:ci
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8000/health | grep -q '"healthy"'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Service did not become healthy within 90s"
+          docker logs chapkit-ci
+          exit 1
       - name: Install uv
         uses: astral-sh/setup-uv@v4
       - name: Install deps
