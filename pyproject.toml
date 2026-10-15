@@ -1,0 +1,13 @@
+[project]
+name = "XGBoost_for_Malawi"
+version = "0.1.0"
+description = "A general XGBoost model fitted individually for each region."
+requires-python = ">=3.13"
+dependencies = [
+    "chapkit>=2.3.0,<3",
+]
+
+[dependency-groups]
+dev = [
+    "uvicorn[standard]>=0.30.0",
+]
