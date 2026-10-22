@@ -27,7 +27,7 @@ to `main` (`:latest`) and every `v*.*.*` tag. From a CHAP Docker Compose
 deployment directory:
 
 ```bash
-chap-admin install xgboost-for-malawi --image ghcr.io/chap-models/xgboost_for_malawi:latest --accept-risk
+chap-admin install xgboost_for_malawi --image ghcr.io/chap-models/xgboost_for_malawi:latest --accept-risk
 ```
 
 To pin a release, replace `latest` with a version tag such as `0.1.0`.
